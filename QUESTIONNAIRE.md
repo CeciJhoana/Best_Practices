@@ -74,11 +74,21 @@ Thirty questions total. The first twenty cover issues found in the code and how 
 
 **12. `listRooms()` is reported as "the slowest endpoint in the system" — sometimes 30+ seconds. Inspecting the code reveals two compounding problems. What are they?**
 
+**Respuesta:** En `RoomController.listRooms()` la lentitud viene de dos problemas compuestos:
+1) `computeDynamicPrice()` se invoca dentro del loop por cada habitación, lo que dispara consultas adicionales por room. Esto multiplica la carga y genera una O(N) excesiva sobre la base de datos.
+2) `computeDynamicPrice()` incluye un `Thread.sleep(500)`, lo que agrega 500 ms de latencia por habitación y convierte solicitudes de listado en caminos de ejecución extremadamente lentos. Ambos juntos degradan el rendimiento (P) y hacen que el endpoint no escale (S).
+
 **13. `searchRooms()` calls its own `/rooms/{id}/availability` endpoint via HTTP for every room in the catalog. What is wrong with this approach, and what should it do instead?**
+
+**Respuesta:** Ese diseño hace un HTTP loopback interno dentro del mismo servicio: por cada habitación activa se dispara una llamada a `inventory-service` para verificar disponibilidad. Esto es ineficiente, frágil y crea latencia y uso innecesario de recursos. En lugar de eso, debe usar directamente la lógica interna de disponibilidad o una consulta de base de datos compartida, sin pasar por la red. Para esto usamos `isRoomAvailable()` directo para arreglarlo.
 
 **14. `computeDynamicPrice()` returns `BigDecimal.ZERO` when the room is not found. Why is this a resilience problem and not just a correctness bug? What is the right pattern?**
 
+**Respuesta:** Devolver `BigDecimal.ZERO` oculta un error de estado: una habitación inexistente se convierte en un precio válido de `0`, lo cual puede propagar datos incorrectos hacia el cliente y hacia otros servicios. Esto no es solo un bug de exactitud; es una falla de resiliencia porque un recurso faltante produce una respuesta aparentemente válida que puede desencadenar decisiones erróneas downstream. La forma correcta es devolver un error explícito (`404`) o lanzar una excepción controlada, no un valor de negocio falso.
+
 **15. The dynamic-pricing computation is repeated identically across many concurrent requests during a sale. Why is this a scalability problem, and what is the correct caching strategy for a value that "changes slowly"?**
+
+**Respuesta:** Calcular el precio dinámico idénticamente en múltiples solicitudes genera trabajo redundante y carga innecesaria en la base de datos. Durante picos de demanda, esto puede saturar la capa de datos y aumentar latencias. La estrategia correcta es cachear el precio dinámico por llave de contexto (por ejemplo `roomId` + `checkIn` + `checkOut`) con TTL razonable, de modo que se reutilice el valor mientras siga siendo válido. Así se mejora la escalabilidad y se reduce la presión sobre la base de datos en ventas con alto tráfico.
 
 ### notification-service
 
