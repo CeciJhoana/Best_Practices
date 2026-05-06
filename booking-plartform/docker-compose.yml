@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_MULTIPLE_DATABASES: users_db,bookings_db,inventory_db,notifications_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./docs/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+      - ./docs/seed.sql:/docker-entrypoint-initdb.d/seed.sql
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  user-service:
+    build: ./user-service
+    ports:
+      - "5001:5001"
+    depends_on:
+      - postgres
+      - redis
+
+  booking-service:
+    build: ./booking-service
+    ports:
+      - "5002:5002"
+    depends_on:
+      - postgres
+      - user-service
+      - inventory-service
+      - notification-service
+
+  inventory-service:
+    build: ./inventory-service
+    ports:
+      - "5003:5003"
+    depends_on:
+      - postgres
+      - redis
+
+  notification-service:
+    build: ./notification-service
+    ports:
+      - "5004:5004"
+    depends_on:
+      - postgres
+      - user-service

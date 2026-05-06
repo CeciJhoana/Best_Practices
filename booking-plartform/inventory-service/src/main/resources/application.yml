@@ -1,0 +1,28 @@
+server:
+  port: 5003
+
+spring:
+  application:
+    name: inventory-service
+  datasource:
+    url: jdbc:postgresql://postgres:5432/inventory_db
+    username: postgres
+    password: postgres
+    hikari:
+      maximum-pool-size: 5
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+  data:
+    redis:
+      host: redis
+      port: 6379
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics

@@ -1,0 +1,24 @@
+server:
+  port: 5002
+
+spring:
+  application:
+    name: booking-service
+  datasource:
+    url: jdbc:postgresql://postgres:5432/bookings_db
+    username: postgres
+    password: postgres
+    hikari:
+      maximum-pool-size: 5
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
