@@ -130,20 +130,122 @@ Nuevas preocupaciones:
 
 **21. *Latency percentiles (p50 / p95 / p99) per endpoint.* What does it mean when p50 is healthy (e.g. 80 ms) but p99 is 5 s, and what kinds of root causes does that pattern point to?**
 
+**Respuesta:** Un p50 saludable (80 ms) pero p99 alto (5 s) indica tail latencies causadas por eventos raros. 
+Root causes: 
+1) GC pauses que congelan threads (100ms+). 
+2) Thread pool saturation ocasional. 
+3) Lock contention en BD. 
+4) Connection pool exhaustion con pool-size=5. 
+
+En el proyecto se encuentra N+1 queries en listUsers() e inventory-service/listRooms() causan picos de latencia. 
+
 **22. *Throughput (requests per second) and saturation point.* How do you experimentally determine the maximum throughput of a service, and what should you watch for as the indicator that you have crossed it?**
+
+**Respuesta:** Mediante load testing: incrementar RPS gradualmente (10, 50, 100, 500, 1000) observando métricas. Saturation point es donde latencia y error rate degradan. 
+
+Indicadores de cruce: 
+1) p99 latency sube de 200ms a 2000ms+. 
+2) Error rate > 0 (primeras 5xx responses). 
+3) hikaricp_connections_pending > 0 (pool exhausted). 
+4) tomcat_threads_busy = máximo. 
+5) Throughput no crece pero latency crece. 
+En el proyecto esta con pool-size=5 y N+1 queries, saturation point es bajo (~100-200 RPS).
 
 **23. *Error rate, broken down by status class (4xx vs 5xx).* Why is this distinction critical, and how do you set actionable alert thresholds?**
 
+**Respuesta:** 4xx = error del cliente (bad request), 5xx = error del servidor (culpa infraestructura). Crítico porque alertar en ambos causa falsos positivos. 
+En el proyecto 4xx es esperable (bad bookings, invalid users), 5xx nunca debería ocurrir. 
+
+Thresholds accionables: 
+1) 5xx > 1% = CRITICAL alert (degradación). 
+2) 4xx > 10% = WARNING (patrón anómalo, posible bot). 
+3) 5xx > 0.1% pero estable = investigate. 
+
+Podemos alertar si 409 (conflict) sube porque indica contención de reservas, o 408 (timeout) sube porque indica latencia upstream.
+
 **24. *Database connection-pool saturation (`hikaricp_connections_pending`, `hikaricp_connections_active`).* In this project, several services have `maximum-pool-size: 5`. What metric tells you the pool is the bottleneck, and what does a non-zero `pending` value mean?**
+
+**Respuesta:** Pool es bottleneck cuando connections_active = 5 (máximo) sostenido AND connections_pending > 0. Un pending no-zero es crítico: solicitudes se bloquean esperando conexión, acumulan en cola, degradan latencia y eventualmente timeout. En el proyecto con pool-size=5: bajo carga normal pending=0, pero en picos (varias listBookings + listRooms concurrentes) pending sube rápidamente porque N+1 queries agota todas las conexiones. Alerta: if pending > 0 for > 5 segundos = ALERT. 
+
+Solución: 
+1) Aumentar pool-size a 10-15. 
+2) Eliminar N+1 queries. 
+3) Agregar caching. La métrica clave es hikaricp_connections_pending; si > 0, el pool es el cuello de botella, no la base de datos.
 
 **25. *Service-to-service call latency, separated from internal work.* In a microservice, total request time = local work + sum of downstream call times. Why must you instrument these separately, and how does distributed tracing make this possible?**
 
+**Respuesta:** Sin separación, no sabes dónde está el problema real. Por ejemplo tenemos booking-service/listBookings toma 3 segundos. Esto porque: 
+
+ - local processing lento (100ms).
+ - llamadas HTTP a user-service lentas (2s). 
+- Sin instrumentación por separado, adivinas. 
+
+Con separación: local_time = total - downstream_time. Si local_time = 100ms pero downstream = 2.9s, el problema es remoto. Distributed tracing (OpenTelemetry, Jaeger) hace esto propagando trace ID entre servicios: 
+1) booking-service genera trace ID. 
+2) Lo añade en header X-Trace-ID. 
+3) user-service recibe y propaga la misma trace ID. 
+4) inventory-service igual. 
+5) Jaeger agrupa todos los spans bajo una trace. 
+
+Por lo que en el proyecto: booking-service/listBookings hace N llamadas HTTP. Con tracing ves: booking-service (100ms) → user-service (2s) → inventory-service (3s). Conclusión inmediata: inventory-service es el problema. Herramientas: OpenTelemetry + Jaeger, o Spring Cloud Sleuth + Zipkin.
+
 **26. *JVM heap, GC pause time, and GC frequency.* What pattern in these metrics indicates a memory leak, and what indicates that GC is itself becoming a performance problem?**
+
+**Respuesta:** Patrón de memory leak: heap usage crece monotónicamente (100MB → 200MB → 500MB → 800MB acercándose al máximo). Tras cada GC, recovery es mínimo (<5%). Indica objetos no liberados acumulándose. En este proyecto: si Redis cache en getUserProfile() nunca expira (no había TTL en original), o si notificaciones acumulan en memoria sin limpieza, heap crece indefinidamente. 
+GC se convierte en performance problem cuando: 
+1) GC frequency > 1 pausa/segundo (indica presión de heap). 
+2) GC pause time > 100ms (stop-the-world bloquea todos los threads). 
+3) GC time % de total > 5% (mucho tiempo reciclando, poco tiempo útil). 
+
+Patrón típico: heap lleno → GC frecuente → pausas largas → latencia aumenta. 
+ 
+ Métrica de alerta clave: si jvm_gc_pause_seconds > 0.1s frecuentemente, degradación está próxima.
 
 **27. *Thread-pool saturation (Tomcat busy threads, executor queue depth).* In a Spring Boot service, what metric tells you the HTTP layer is the bottleneck, and how does it interact with downstream call latency?**
 
+**Respuesta:** HTTP layer es bottleneck cuando tomcat_threads_busy = tomcat_threads_current (todos los threads ocupados) Y nuevas solicitudes se encolan. La métrica clave es **tomcat_threads_busy / tomcat_threads_current ratio**, que debe estar < 0.7 en producción. Si ratio = 1.0 sostenido, el layer está saturado. 
+
+Interacción con downstream call latency: si una solicitud hace llamada HTTP lenta a otro servicio, el thread se bloquea esperando respuesta. Si muchas solicitudes hacen esto (ej. booking-service esperando user-service), todos los threads se bloquean, la queue se llena, y nuevas solicitudes reciben 503 (Service Unavailable). 
+
+En este proyecto: booking-service/listBookings hace 2 llamadas HTTP por booking. Si user-service es lento (2 segundos), el thread de booking-service se bloquea 2s por booking. Con 50 bookings concurrentes = 50 threads bloqueados. Default Tomcat thread pool es ~10 threads, así que se satura rápidamente. 
+Tendremos alerta si tomcat_threads_queue_size > 0 for > 10 segundos = HTTP layer saturado.
+
 **28. *Cache hit ratio.* The `getUserProfile()` endpoint caches in Redis. If the hit ratio is 30 %, what does that tell you, and what are the most common causes of a low hit ratio?**
+
+**Respuesta:** Hit ratio del 30% significa que de 10 solicitudes, 3 vienen de cache y 7 van a BD. Esto es muy bajo; en producción se espera 80%+ para que el caching sea efectivo. 
+
+Causas comunes: 
+1) **TTL too short**: en el código original no había TTL, en la corrección se añadió 10 minutos. Si un usuario hace request cada 12 minutos, siempre cache miss. 
+2) **Working set > cache size**: si tenemos 1M usuarios activos y cache solo 100K, ratio baja. 
+3) **Cache invalidation problems**: si el cache no se invalida cuando el perfil se actualiza, hay inconsistencia. 
+4) **Cache key granularity**: en este proyecto, key = `user_profile_{id}`. Si cada usuario accede una sola vez, hit ratio = 0%. 
+
+
+Métrica recomendada: `redis_cache_hits / (redis_cache_hits + redis_cache_misses)` por endpoint. Si getUserProfile hit ratio < 50%, investigar si TTL es muy corta o working set es mayor que cache. Nota: hit ratio bajo no siempre es malo si el trabajo remoto (BD) es rápido; importa más la p99 latency general.
 
 **29. *Apdex / SLO compliance.* Instead of arguing about "is 800 ms fast enough", how do you turn user experience into a single number you can track, and what is the difference between an SLI, an SLO, and an Apdex score?**
 
+**Respuesta:** Apdex (Application Performance Index) convierte latencias en un score 0-1. Define 2 thresholds: T (satisfactory, ej. 500ms) y 4T (tolerable, ej. 2s). Fórmula: Apdex = (satisfactory + tolerable/2) / total requests. Si p50=100ms, p90=400ms, p99=2s: Apdex ≈ 0.85 (bueno). 
+
+Diferencias clave: 
+1) **SLI** (Service Level Indicator): métrica observable (ej. "p99 latency" o "error rate"). 
+2) **SLO** (Service Level Objective): target deseado (ej. "p99 < 500ms" o "error rate < 0.1%"). 
+3) **Apdex**: índice de utilidad que resume user experience (0.8+ = satisfied, 0.5-0.8 = tolerated, <0.5 = frustrated). En este proyecto: definir SLI = listBookings p99 < 2s, SLO = Apdex > 0.8. 
+Monitorear compliance: si Apdex cae bajo 0.7 por 5 minutos, trigger alert. Beneficio: en lugar de argumento abstracto "¿es 800ms fast?", stakeholders entienden "Apdex 0.7 significa 30% de usuarios frustrated". Herramientas: Prometheus alert en Apdex, Grafana dashboard mostrando SLI vs SLO.
+
 **30. *Saturation, the fourth USE/RED metric.* Beyond Latency, Errors, and Throughput (RED), why is "saturation" — how full a resource is — the single best leading indicator that performance is about to degrade, and what concrete things would you measure on each service in this project?**
+
+**Respuesta:** Saturation es el mejor leading indicator porque predice degradación antes de que ocurra. 
+
+Patrón causal: saturation sube → solicitudes esperan → latency sube → error rate sube. Ejemplo: hikaricp_connections_pending > 0 (saturation) → p99 latency sube → usuarios reciben timeout. RED (Latency, Errors, Throughput) es reactivo: ves el problema cuando ya ocurrió. Saturation es proactivo: ves que el sistema se llena ANTES de fallar. USE metrics (Utilization, Saturation, Errors) son complementarias: Utilization = % de recurso en uso (connections_active / max), Saturation = items esperando (connections_pending), Errors = fallos. 
+
+En este proyecto, medir por servicio: 
+1) **user-service**: hikaricp_connections_active, hikaricp_connections_pending, tomcat_threads_busy, tomcat_threads_queue_size. 
+2) **booking-service**: idem + redis memory usage. 
+3) **inventory-service**: idem + redis key count (saturation de cache). 
+4) **notification-service**: async_executor_active_threads, async_executor_queue_size (saturation de async task queue). 
+
+Alertas preventivas: 
+1) if hikaricp_connections_pending > 0 for 30 segundos → scale up BD o optimize queries. 
+2) if tomcat_threads_queue_size > 5 → scale up threads o fix downstream latency. 
+3) if async_executor_queue_size > 100 → notifications backing up, increase thread pool. Estas métricas dan 5-10 minutos de warning antes de que error rate suba."
