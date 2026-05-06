@@ -1,6 +1,6 @@
 # Booking Platform — Sample Project with Performance, Scalability, and Resilience Issues
 
-
+Repository: [https://github.com/CeciJhoana/Best_Practices](https://github.com/CeciJhoana/Best_Practices)
 
 ## Architecture
 
