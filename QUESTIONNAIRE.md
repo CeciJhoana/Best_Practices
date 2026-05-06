@@ -94,13 +94,35 @@ Thirty questions total. The first twenty cover issues found in the code and how 
 
 **16. The `notify()` endpoint retries failed sends up to five times with `Thread.sleep(2000)` between attempts, all in the request thread. Describe both the local impact and the upstream impact.**
 
+**Respuesta:** Los reintentos con `Thread.sleep(2000)` en el hilo de la request bloquean el hilo Tomcat. Con 5 intentos x 2 segundos = 10 segundos de bloqueo por fallo, lo que agota el pool de threads (local impact en P). Upstream, `booking-service` espera a que `notify()` complete; si muchas notificaciones fallan, se acumula carga de espera causando timeouts en cascada y agotamiento de threads en booking-service también degradando la escalabilidad y resiliencia.
+
 **17. The retry loop uses a fixed 2-second delay. Even if it were moved off the request thread, this is still wrong. Why, and what is the correct algorithm?**
+
+**Respuesta:** Un delay fijo de 2 segundos es predecible: si el servidor de emails está saturado, todos los reintentos llegan exactamente cada 2 segundos, amplificando la carga (problema de "thundering herd"). La solución correcta es exponential backoff con jitter: esperar 2s, luego 4s, luego 8s, etc., con variación aleatoria. Esto espacía los reintentos, reduce picos de carga y evita ciclos de congestión.
 
 **18. `broadcast()` sends a message to every user by iterating in a `for` loop and inserting one row per recipient. Identify three distinct issues and how you would address them.**
 
+**Respuesta:** Tres problemas:
+1. **Loop de inserciones individuales**: Por cada usuario, una INSERT separada. Esto es O(N) lento y genera mucha overhead de red a la BD. Solución: usar `saveAll()` o batch insert.
+2. **Bloqueo en el request thread**: El loop completo se ejecuta dentro de la HTTP request, bloqueando al cliente. Solución: usar `@Async` para ejecutar en thread pool separado.
+3. **Sin manejo de fallos**: Si `user-service` falla a mitad del broadcast, se pierden notificaciones. Solución: capturar excepciones y registrar fallos en dead-letter queue para reintentos.
+
 **19. Failed notifications are stored with `status = "failed"` and forgotten. Why is this a silent reliability bug, and how should a production system handle delivery failures?**
 
+**Respuesta:** Marcar un status como "failed" sin mecanismo de reintento o alertas es un bug silencioso: notificaciones críticas (confirmación de booking, etc.) nunca llegan pero nadie se da cuenta. Esto degrada la resiliencia. 
+La solución correcta es: 
+1) Almacenar con `status = "dead_letter"` tras agotar reintentos. 
+2) Implementar un scheduler que reintente mensajes pendientes con exponential backoff. 
+3) Monitorear la cola de dead-letter con alertas para intervención manual.
+
 **20. The whole notification path runs synchronously inside the HTTP request triggered by `booking-service`. What architectural change makes the system both more resilient and more scalable, and what new concerns does it introduce?**
+
+**Respuesta:** El cambio arquitectónico es desacoplar notificaciones usando messaging asincrónico (RabbitMQ, Kafka, SQS). En lugar de `booking-service` llamar a `notify()` directamente, publica un evento a una cola. `notification-service` consume asincronamente, intentando reintentos sin bloquear a booking-service. Mejora la escalabilidad (desacoplamiento) y resiliencia (fallos aislados). 
+Nuevas preocupaciones: 
+1) Consistencia eventual (notificaciones llegan después), 
+2) Complexity operacional (monitorear colas), 
+3) Necesidad de dead-letter queues y alertas para fallos persistentes, 
+4) Duplicate processing si el consumer falla (se necesita idempotency).
 
 ---
 

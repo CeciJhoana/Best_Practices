@@ -17,7 +17,9 @@ public class Notification {
     private String type;
     @Column(length = 2000)
     private String message;
-    private String status;
+    private String status;  
     private Integer attempts = 0;
+    private Integer maxAttempts = 5;
+    private LocalDateTime nextRetryAt;  
     private LocalDateTime createdAt = LocalDateTime.now();
 }
