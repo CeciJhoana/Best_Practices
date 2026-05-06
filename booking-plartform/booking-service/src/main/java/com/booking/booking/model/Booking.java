@@ -18,5 +18,6 @@ public class Booking {
     private LocalDate checkIn;
     private LocalDate checkOut;
     private String status;
+    private String idempotencyKey;
     private LocalDateTime createdAt = LocalDateTime.now();
 }

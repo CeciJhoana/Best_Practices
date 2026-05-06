@@ -17,4 +17,6 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
     @Query("SELECT b FROM Booking b WHERE b.roomId = :roomId AND b.status = 'confirmed' " +
             "AND b.checkIn < :checkOut AND b.checkOut > :checkIn")
     Optional<Booking> findOverlapping(Long roomId, LocalDate checkIn, LocalDate checkOut);
+
+    boolean existsByIdempotencyKey(String idempotencyKey);
 }

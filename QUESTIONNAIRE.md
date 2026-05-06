@@ -43,15 +43,32 @@ Thirty questions total. The first twenty cover issues found in the code and how 
 
 **6. `createBooking()` is annotated/declared `synchronized` *and* uses an internal `bookingLock`. What is wrong with this design, and how should concurrency for booking creation actually be handled?**
 
+**Respuesta:** El método `createBooking()` está marcado como `synchronized` y usa un `bookingLock` interno, lo que serializa todas las solicitudes de creación de bookings, causando un cuello de botella en concurrencia. Esto no escala porque solo una petición puede procesarse a la vez. La concurrencia real debe manejarse en la base de datos con constraints únicos o locking optimista, permitiendo que múltiples hilos procesen bookings concurrentemente sin bloqueos globales.
+
 **7. `listBookings()` returns each booking enriched with the user and the room. With many bookings, the endpoint becomes very slow. What is the problem and what are two ways to fix it?**
+
+**Respuesta:** El problema es N+1 queries: por cada booking, se hace una llamada HTTP a `user-service` y `inventory-service` para enriquecer los datos. Con muchos bookings, esto causa latencia alta y carga en servicios downstream. Dos formas de arreglarlo: 
+1) Devolver solo IDs en la respuesta y dejar que el cliente haga las llamadas necesarias (mejora la escalabilidad al distribuir carga) implementamos esta solución. 
+2) Usar batch APIs o caching para reducir llamadas HTTP.
 
 **8. `RestTemplate` is registered as a `@Bean` with no explicit configuration. In production this leads to outages that look like the booking-service is "stuck". Explain why, and what configuration is needed.**
 
+**Respuesta:** `RestTemplate` por defecto no tiene timeouts configurados, por lo que llamadas HTTP pueden bloquearse indefinidamente si el servicio remoto no responde, causando que el hilo se quede esperando y agotando el pool de hilos (P). Esto lleva a "stuck" porque no hay liberación de recursos. Se necesita configurar `connectTimeout` y `readTimeout` (ej. 5s y 10s) para evitar hangs y mejorar resiliencia (R).
+
 **9. The `POST /bookings` endpoint has no idempotency mechanism. Why is this dangerous in a microservice context, and how do you implement idempotency correctly?**
+
+**Respuesta:** Sin idempotency, reintentos de red o fallos temporales pueden crear bookings duplicados, causando inconsistencia de datos. En microservicios, los clientes reintentan automáticamente, lo que es peligroso para operaciones no idempotentes. Implementar con una clave de idempotency (ej. UUID en header), almacenada en DB, verificando existencia antes de procesar.
 
 **10. In `createBooking()`, the call to `notification-service` happens synchronously *after* the booking is committed. What two failure modes does this cause, and what is the standard fix?**
 
+**Respuesta:** Dos modos de falla: 
+1) Si la notificación falla, el booking se hace pero el usuario no se entera (pérdida de notificación). 
+2) Si se hace rollback por falla en notificación, se pierde el booking válido. 
+- La solución estándar es usar messaging asíncrono (ej. RabbitMQ o Kafka) para enviar notificaciones después del commit, desacoplando y mejorando resiliencia.
+
 **11. The booking flow has no circuit breaker on the calls to `inventory-service` or `user-service`. Describe the failure mode this enables, and what a circuit breaker actually does.**
+
+**Respuesta:** Sin circuit breaker, si `user-service` o `inventory-service` fallan, `booking-service` continúa intentando llamadas, causando cascada de fallos, agotamiento de recursos y downtime (R). Un circuit breaker (ej. Resilience4j) monitorea fallos y abre el circuito temporalmente, fallando rápido y permitiendo recuperación, previniendo cascadas.
 
 ### inventory-service
 
